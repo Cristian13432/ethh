@@ -1,0 +1,115 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+contract MultiSigWallet {
+    address[] public owners;
+    mapping(address => bool) public isOwner;
+    uint256 public numConfirmationsRequired;
+
+    struct Transaction {
+        address to;
+        uint256 value;
+        bytes data;
+        bool executed;
+        uint256 numConfirmations;
+    }
+
+    mapping(uint256 => mapping(address => bool)) public isConfirmed;
+    mapping(uint256 => Transaction) public transactions;
+    uint256 public transactionCount;
+
+    event Deposit(address indexed sender, uint256 value);
+    event Submission(uint256 indexed transactionId);
+    event Confirmation(address indexed sender, uint256 indexed transactionId);
+    event Execution(uint256 indexed transactionId);
+    event ExecutionFailure(uint256 indexed transactionId);
+
+    modifier onlyOwner() {
+        require(isOwner[msg.sender], "Caller is not an owner");
+        _;
+    }
+
+    modifier transactionExists(uint256 _transactionId) {
+        require(_transactionId < transactionCount, "Transaction does not exist");
+        _;
+    }
+
+    modifier notExecuted(uint256 _transactionId) {
+        require(!transactions[_transactionId].executed, "Transaction already executed");
+        _;
+    }
+
+    modifier notConfirmed(uint256 _transactionId) {
+        require(!isConfirmed[_transactionId][msg.sender], "Transaction already confirmed");
+        _;
+    }
+
+    constructor(address[] memory _owners, uint256 _numConfirmationsRequired) {
+        require(_owners.length > 0, "Owners required");
+        require(_numConfirmationsRequired > 0 && _numConfirmationsRequired <= _owners.length, "Invalid number of confirmations");
+
+        for (uint256 i = 0; i < _owners.length; i++) {
+            address owner = _owners[i];
+            require(owner != address(0), "Invalid owner");
+            require(!isOwner[owner], "Owner not unique");
+
+            isOwner[owner] = true;
+            owners.push(owner);
+        }
+
+        numConfirmationsRequired = _numConfirmationsRequired;
+    }
+
+    receive() external payable {
+        emit Deposit(msg.sender, msg.value);
+    }
+
+    function submitTransaction(address _to, uint256 _value, bytes memory _data) external onlyOwner {
+        uint256 transactionId = transactionCount;
+        transactions[transactionId] = Transaction({
+            to: _to,
+            value: _value,
+            data: _data,
+            executed: false,
+            numConfirmations: 0
+        });
+        transactionCount++;
+        emit Submission(transactionId);
+    }
+
+    function confirmTransaction(uint256 _transactionId) external onlyOwner transactionExists(_transactionId) notExecuted(_transactionId) notConfirmed(_transactionId) {
+        Transaction storage transaction = transactions[_transactionId];
+        transaction.numConfirmations++;
+        isConfirmed[_transactionId][msg.sender] = true;
+        emit Confirmation(msg.sender, _transactionId);
+
+        if (transaction.numConfirmations >= numConfirmationsRequired) {
+            executeTransaction(_transactionId);
+        }
+    }
+
+    function executeTransaction(uint256 _transactionId) public onlyOwner transactionExists(_transactionId) notExecuted(_transactionId) {
+        Transaction storage transaction = transactions[_transactionId];
+        require(transaction.numConfirmations >= numConfirmationsRequired, "Not enough confirmations");
+
+        (bool success, ) = transaction.to.call{value: transaction.value}(transaction.data);
+        if (success) {
+            transaction.executed = true;
+            emit Execution(_transactionId);
+        } else {
+            emit ExecutionFailure(_transactionId);
+        }
+    }
+
+    function getTransactionCount() external view returns (uint256) {
+        return transactionCount;
+    }
+
+    function getOwners() external view returns (address[] memory) {
+        return owners;
+    }
+
+    function isConfirmedBy(uint256 _transactionId, address _owner) external view returns (bool) {
+        return isConfirmed[_transactionId][_owner];
+    }
+}
